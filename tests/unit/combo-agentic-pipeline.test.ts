@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  compactAgenticBody,
   countToolResultTurns,
   handleAgenticPipelineChat,
   hasTrailingToolResult,
@@ -240,6 +241,83 @@ test("agentic pipeline rejects configurations that are not planner + executor", 
     log,
   });
   assert.equal(result.status, 400);
+});
+
+test("executor failures fall through the configured executor chain", async () => {
+  const seen: string[] = [];
+  const result = await handleAgenticPipelineChat({
+    body: {
+      messages: [{ role: "user", content: "inspect" }],
+      tools: [{ name: "read" }],
+    },
+    steps: [{ model: "p/planner" }, { model: "p/first" }, { model: "p/fallback" }],
+    handleSingleModel: async (_body, model) => {
+      seen.push(model);
+      if (model === "p/planner") return responseText("OMNIROUTE_ROUTE: TOOLS\nRead it.");
+      if (model === "p/first") return new Response("limited", { status: 429 });
+      return responseText("fallback-tool-call");
+    },
+    log,
+  });
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(seen, ["p/planner", "p/first", "p/fallback"]);
+});
+
+test("repeated calls stop the tool loop and return control to the planner", async () => {
+  const seen: string[] = [];
+  await handleAgenticPipelineChat({
+    body: {
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", name: "read", input: { path: "a" } }] },
+        { role: "user", content: [{ type: "tool_result", content: "no progress" }] },
+        { role: "assistant", content: [{ type: "tool_use", name: "read", input: { path: "a" } }] },
+        { role: "user", content: [{ type: "tool_result", content: "no progress" }] },
+      ],
+      tools: [{ name: "read" }],
+    },
+    steps: steps(),
+    handleSingleModel: async (_body, model) => {
+      seen.push(model);
+      return responseText("OMNIROUTE_ROUTE: TOOLS\nTry again.");
+    },
+    log,
+  });
+
+  assert.deepEqual(seen, ["p/planner", "p/planner"]);
+});
+
+test("model-specific compaction deduplicates tools and preserves the active tool pair", () => {
+  const large = "x".repeat(20_000);
+  const result = compactAgenticBody(
+    {
+      tools: [{ name: "read" }, { name: "read" }],
+      messages: [
+        { role: "user", content: `old ${large}` },
+        { role: "assistant", content: "old answer" },
+        { role: "assistant", content: [{ type: "tool_use", id: "active", name: "read" }] },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "active", content: large }],
+        },
+      ],
+    },
+    "p/small",
+    {
+      contextCompaction: {
+        modelMaxChars: { "p/small": 10_000 },
+        targetRatio: 0.75,
+        toolResultMaxChars: 1_000,
+      },
+    }
+  );
+
+  assert.equal(result.compacted, true);
+  assert.ok(result.after < result.before);
+  assert.equal((result.body.tools as unknown[]).length, 1);
+  const serialized = JSON.stringify(result.body);
+  assert.match(serialized, /active/);
+  assert.match(serialized, /evidence compacted/);
 });
 
 test("pipeline dispatch wiring selects agentic mode when enabled", async () => {

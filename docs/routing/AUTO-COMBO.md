@@ -344,8 +344,17 @@ step.
 The executor may emit multiple independent calls in one response. Dependent calls are
 handled in later client tool-result turns, with the planner reviewing every result.
 `maxToolRounds` defaults to `8` and accepts `1`–`32`; once reached, the planner must
-produce the best available final answer. Internal planner decisions are buffered, while
-the selected client-facing response preserves the original streaming preference.
+produce the best available final answer. Repeated calls and consecutive tool errors also
+stop a stalled loop. Additional models after the first executor form an ordered executor
+fallback chain. Internal planner decisions are buffered, while the selected client-facing
+response preserves the original streaming preference.
+
+Optional `contextCompaction` settings bound each model independently before dispatch.
+`modelMaxChars` maps exact model IDs to their measured input thresholds, while
+`defaultMaxChars` covers every other model. Compaction deduplicates tool definitions and
+tool results, trims oversized evidence with a stable digest, and retains recent history
+plus the active tool call/result boundary. This keeps long-running agent sessions usable
+without assuming that every planner and executor has the same context window.
 
 ## Fusion Strategy
 
